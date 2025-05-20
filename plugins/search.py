@@ -1,43 +1,83 @@
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from config import CHANNELS
 
-SEARCH_LIMIT = 30
+RESULTS_PER_PAGE = 10
+search_cache = {}  # {user_id: [messages]}
+page_tracker = {}  # {user_id: current_page}
 
-async def handle_search(client, message):
-    query = message.text
-    results = []
+
+def human_size(size):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TB"
+
+
+async def handle_search(client: Client, message: Message):
+    query = message.text.strip()
+    if not query:
+        await message.reply("❗ Please provide a search query.")
+        return
+
+    user_id = message.from_user.id
+    matched_msgs = []
 
     for channel in CHANNELS:
         async for msg in client.search_messages(channel, query, filter="document"):
             if msg.document:
-                results.append(msg)
-                if len(results) >= SEARCH_LIMIT:
-                    break
+                matched_msgs.append(msg)
+            if len(matched_msgs) >= 100:
+                break
 
-    if not results:
+    if not matched_msgs:
         await message.reply("❌ No files found.")
         return
 
-    buttons = [
-        [InlineKeyboardButton(f"{msg.document.file_name}", callback_data=f"get_{msg.chat.id}_{msg.message_id}")]
-        for msg in results
-    ]
-
-    await message.reply("🔍 Select a file to download:", reply_markup=InlineKeyboardMarkup(buttons))
+    search_cache[user_id] = matched_msgs
+    page_tracker[user_id] = 1
+    await send_page(client, message, user_id, 1)
 
 
-async def handle_button_click(client, callback_query):
-    data = callback_query.data
-    if not data.startswith("get_"):
+async def send_page(client: Client, message_or_cb, user_id: int, page: int):
+    msgs = search_cache.get(user_id, [])
+    start = (page - 1) * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    page_msgs = msgs[start:end]
+
+    if not page_msgs:
+        await message_or_cb.reply("⚠ No results on this page.")
         return
 
-    _, chat_id, msg_id = data.split("_")
-    chat_id = int(chat_id)
-    msg_id = int(msg_id)
+    text_lines = []
+    for msg in page_msgs:
+        name = msg.document.file_name
+        size = human_size(msg.document.file_size)
+        link = f"https://t.me/c/{str(msg.chat.id)[4:]}/{msg.message_id}"
+        text_lines.append(f"[{size}] [{name}]({link})")
 
-    try:
-        file_msg = await client.get_messages(chat_id, int(msg_id))
-        await file_msg.copy(callback_query.message.chat.id)
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=f"page_{page - 1}"))
+    if end < len(msgs):
+        buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"page_{page + 1}"))
+
+    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+    text = f"**Search Results – Page {page}**\n\n" + "\n".join(text_lines)
+
+    if isinstance(message_or_cb, Message):
+        await message_or_cb.reply(text, disable_web_page_preview=True, reply_markup=reply_markup)
+    else:
+        await message_or_cb.edit_message_text(text, disable_web_page_preview=True, reply_markup=reply_markup)
+    page_tracker[user_id] = page
+
+
+async def handle_callback(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data.startswith("page_"):
+        page = int(data.split("_")[1])
+        await send_page(client, callback_query, user_id, page)
         await callback_query.answer()
-    except Exception:
-        await callback_query.answer("⚠️ Failed to retrieve file.", show_alert=True)
