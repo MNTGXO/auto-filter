@@ -1,0 +1,18 @@
+name: shobana-search-bot
+regions:
+  - fra
+services:
+  - name: bot
+    build:
+      type: docker
+    run:
+      cmd: python bot.py
+    env:
+      - name: API_ID
+        value: "your_api_id"
+      - name: API_HASH
+        value: "your_api_hash"
+      - name: BOT_TOKEN
+        value: "your_bot_token"
+      - name: CHANNELS
+        value: "-1001234567890 -1009876543210"
